@@ -1,6 +1,6 @@
 import numpy as np
 import cv2 as cv
-import time, math
+import time, math, copy
 
 def load_video_file():
     cap = cv.VideoCapture('../content/metal.mp4')
@@ -48,14 +48,14 @@ def get_transformed_img(frame, coords):
 
     width = bottomRight[0] - bottomLeft[0] + topRight[0] - topLeft[0]
     width = int(width / 2)
-    height = int(math.sqrt(math.pow(bottomLeft[1] - topLeft[1], 2) + math.pow((bottomRight[0] - topRight[0]), 2))) + heightExp
+    height = int(math.sqrt(math.pow(bottomLeft[1] - topLeft[1], 2) + math.pow((bottomRight[0] - topRight[0]), 2)))
     #height = frameHeight + heightExp
 
     in_coords = np.float32(coords)
     out_coords = np.float32([[0,0], [width,0], [width,height], [0,height]])
     M = cv.getPerspectiveTransform(in_coords, out_coords)
     # M, status = cv.findHomography(in_coords, out_coords)
-    warped_img = cv.warpPerspective(frame, M, (width, frameHeight))
+    warped_img = cv.warpPerspective(frame, M, (width, height))
 
     return warped_img
 
@@ -72,19 +72,50 @@ def output(frame, fret):
     return output
 
 
+# Detection zones are represented as a percentage of overall fret height
+class DetectionZone:
+    def __init__(self, center):
+        self.center = center
+        self.height = baseNoteHeight - (center * noteDistortion)
+        self.state = [False,False,False,False,False]
+
+
+def detect_zone(fret, zone):
+    height, width, ch = fret.shape
+    top = (zone.center - zone.height / 2) * height
+    bottom = (zone.center + zone.height / 2) * height
+
+    for i in range(5):
+        x1 = int(i/5 * width)
+        x2 = int(x1 + width / 5)
+        cv.rectangle(fret,(x1,int(top)), (x2,int(bottom)),(0,0,255), 3)
+
+
+def detect(fret):
+    detection_zones = [DetectionZone(experiment)]
+
+    for zone in detection_zones:
+        detect_zone(fret, zone)
+
+
 def process_frame(frame):
-    (height, width, _) = frame.shape
+    height, width, ch = frame.shape
 
     cv.putText(frame,'Width: ' + str(width), (0,height-60), cv.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2, cv.LINE_AA, False)
     cv.putText(frame,'Height: ' + str(height), (0,height-30), cv.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2, cv.LINE_AA, False)
     
+    # Get fret region
     pts = get_fret_coords(frame)
     poly_pts = pts.reshape((-1,1,2))
-    cv.polylines(frame,[pts],True,(0,255,255))
+    cv.polylines(frame,[pts],True,(0,255,255), 3)
 
-    fret_img = get_transformed_img(frame, pts)
+    fret = get_transformed_img(frame, pts)
 
-    return output(frame, fret_img)
+    # Detection zones
+    detect(fret)
+
+
+    return output(frame, fret)
 
 
 def transform_video_file():
@@ -95,6 +126,7 @@ def transform_video_file():
 
     paused = False
     while cap.isOpened():
+        global experiment
         ret, frame = cap.read()
 
         # check for input
@@ -104,6 +136,10 @@ def transform_video_file():
         if key_press & 0xFF == ord('p'):
             paused = not paused
             #cv.imwrite('../content/screenshot.png',frame)
+        if key_press & 0xFF == ord('o'):
+            experiment -= 0.005
+        if key_press & 0xFF == ord('l'):
+            experiment += 0.005
         
         if paused:
             continue
@@ -119,7 +155,7 @@ def transform_video_file():
 
 
 def transform_img():
-    global heightExp
+    global experiment
     frame = cv.imread('../content/screenshot.png',cv.IMREAD_UNCHANGED)
     cv.namedWindow('vidstream', cv.WINDOW_NORMAL)
     cv.resizeWindow('vidstream', 1920, 720)
@@ -130,22 +166,23 @@ def transform_img():
         if key_press & 0xFF == ord('q'):
             break
         if key_press & 0xFF == ord('o'):
-            heightExp += 1
+            experiment -= 0.005
         if key_press & 0xFF == ord('l'):
-            heightExp -= 1
+            experiment += 0.005
 
         cv.imshow('vidstream', process_frame(frame))
 
     cv.destroyAllWindows()
 
-heightExp = 0
+experiment = 0.2
 
 # Notes are distorted vertically; as the distance from top increases, note height decreases linearly
 # Top note height has been measured to be 12% of total fret board size at the top, with a scaling factor of 1/12
 # In other words note height shrinks by 1 pixel for every 12 pixels a note travels down the screen
 # Rendered note height can thus be calculated as: renderedNoteHeigh = baseNoteHeight - (y * noteDistortion)
-baseNoteHeight = 12
+baseNoteHeight = 0.12
 noteDistortion = 1 / 12
 
-transform_img()
-# transform_video_file()
+
+# transform_img()
+transform_video_file()
