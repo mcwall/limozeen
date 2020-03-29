@@ -2,23 +2,6 @@ import numpy as np
 import cv2 as cv
 import time, math, copy, uuid, sys
 
-def load_video_file():
-    cap = cv.VideoCapture('../content/metal.mp4')
-    while cap.isOpened():
-        ret, frame = cap.read()
-        # if frame is read correctly ret is True
-        if not ret:
-            print("Can't receive frame (stream end?). Exiting ...")
-            break
-        #gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        #cv.imshow('frame', gray)
-        cv.imshow('frame', frame)
-        time.sleep(0.012)
-        if cv.waitKey(1) & 0xFF == ord('q'):
-            break
-    cap.release()
-    cv.destroyAllWindows()
-
 
 def get_fret_coords(frame):
     (height, width, _) = frame.shape
@@ -49,7 +32,6 @@ def get_transformed_img(frame, coords):
     width = bottomRight[0] - bottomLeft[0] + topRight[0] - topLeft[0]
     width = int(width / 2)
     height = int(math.sqrt(math.pow(bottomLeft[1] - topLeft[1], 2) + math.pow((bottomRight[0] - topRight[0]), 2)))
-    #height = frameHeight + heightExp
 
     in_coords = np.float32(coords)
     out_coords = np.float32([[0,0], [width,0], [width,height], [0,height]])
@@ -74,29 +56,23 @@ def filter_func(img):
     return output
 
 
-# Find a better implementation for this
-def calculate_match_confidence(img):
-    height, width, ch = img.shape
-    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
-    
-    match_confidence = cv.countNonZero(gray) / (width * height)
-
-    return match_confidence
-
-
 def detection_filter(fret, zone):
-    #kernel = np.ones((5,5),np.float32)/25
-    #output = cv.filter2D(img,-1,kernel)
+    height, width, ch = fret.shape
 
-    img = fret[zone.p1[1]:zone.p2[1], zone.p1[0]:zone.p2[0]]
+    left = int(zone.left*width)
+    right = int(zone.right*width)
+    top = int(zone.top*height)
+    bottom = int(zone.bottom*height)
+
+    img = fret[top:bottom, left:right]
     filtered_image = filter_func(img)
-    fret[zone.p1[1]:zone.p2[1], zone.p1[0]:zone.p2[0]] = filtered_image
+    fret[top:bottom, left:right] = filtered_image
 
-    zone.match_confidence = calculate_match_confidence(filtered_image)
+    zone.match(filtered_image)
 
 
 def output(frame, fret, detection_rows):
-    global font, colors
+    global font, colors, confidence_threshold
 
     # Initialize canvas
     height, frameWidth, ch = frame.shape
@@ -114,8 +90,13 @@ def output(frame, fret, detection_rows):
         x = width - (len(detection_rows) - i) * fretWidth
         fret_copy = np.copy(fret)
         for idxZone, zone in enumerate(detection_row.zones):
+            zleft = int(zone.left*fretWidth)
+            zright = int(zone.right*fretWidth)
+            ztop = int(zone.top*fretHeight)
+            zbottom = int(zone.bottom*fretHeight)
+
             detection_filter(fret_copy, zone)
-            cv.rectangle(fret_copy, zone.p1, zone.p2, (0,0,255), 3)
+            cv.rectangle(fret_copy, (zleft, ztop), (zright, zbottom), (0,0,255), 3)
 
             x1 = int(x + (idxZone / 5 * fretWidth))
             x2 = int(x1 + fretWidth / 5)
@@ -125,7 +106,8 @@ def output(frame, fret, detection_rows):
             bar_height = bar_bottom - bar_top
             y = int(bar_bottom - zone.match_confidence * bar_height)
 
-            cv.rectangle(output, (x1+2, y), (x2-2, bar_bottom), colors[zone.i], cv.FILLED)
+            fill = cv.FILLED if zone.match_confidence > confidence_threshold else 2
+            cv.rectangle(output, (x1+2, y), (x2-2, bar_bottom), colors[zone.i], fill)
             cv.putText(output, str(int(100*zone.match_confidence)), (x1, detection_bottom), font, 1, colors[zone.i], 2, cv.LINE_AA)
 
         # Draw fret projection
@@ -134,33 +116,52 @@ def output(frame, fret, detection_rows):
     return output
 
 
-class DetectionZone:
-    def __init__(self, fret, i, top, bottom):
-        fretHeight, fretWidth, ch = fret.shape
-        x1 = fretWidth * (i / 5)
-        x2 = x1 + (fretWidth / 5)
 
+class DetectionZone:
+    def __init__(self, i, top, bottom):
         self.i = i
-        self.p1 = (int(x1), top)
-        self.p2 = (int(x2), bottom)
+        self.top = top
+        self.bottom = bottom
+        self.left = i / 5
+        self.right = self.left + (1 / 5)
         self.match_confidence = 0.0
+        self.prev_match = False # was the previous frame a match?
+
+    # Find a better implementation for this
+    def match(self, img):
+        global confidence_threshold
+
+        height, width, ch = img.shape        
+        # consider logarithmic scale instead of linear to avoid false negatives
+        gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+        self.match_confidence = cv.countNonZero(gray) / (width * height)
+        
+        if self.match_confidence > confidence_threshold:
+            if not self.prev_match:
+                # We found a new match, add to queue
+                do_nothing = True
+
+            self.prev_match = True
+        else:
+            self.prev_match = False
+
 
 
 # Detection zones are represented as a percentage of overall fret height
 class DetectionRow:
-    def __init__(self, fret, center_ratio):
-        fretHeight, fretWidth, ch = fret.shape
+    def __init__(self, center_ratio):
+        global base_note_height, note_distortion
 
-        self.center = fretHeight * center_ratio
-        self.height = fretHeight * (baseNoteHeight - (center_ratio * noteDistortion))
-        self.top = int(self.center - (self.height / 2))
-        self.bottom = int(self.center + (self.height / 2))
+        self.center = center_ratio
+        self.height = (base_note_height - (center_ratio * note_distortion))
+        self.top = self.center - (self.height / 2)
+        self.bottom = self.center + (self.height / 2)
 
-        self.zones = [DetectionZone(fret, i, self.top, self.bottom) for i in range(5)]
+        self.zones = [DetectionZone(i, self.top, self.bottom) for i in range(5)]
 
 
 def detect(fret):
-    detection_rows = [DetectionRow(fret, detection_height[0]), DetectionRow(fret, detection_height[1])]
+    global detection_rows
 
     return detection_rows
 
@@ -201,7 +202,7 @@ def run(fname):
     paused = False
     ret = None
     while True:
-        global detection_height, filter_threshold, filter_grayscale
+        global detection_height, filter_threshold, filter_grayscale, detection_rows
 
         if is_video and not paused:
             ret, frame = cap.read()
@@ -219,12 +220,16 @@ def run(fname):
         # Detection heights
         if key_press & 0xFF == ord('i'):
             detection_height[0] -= 0.005
+            detection_rows[0] = DetectionRow(detection_height[0])
         if key_press & 0xFF == ord('k'):
             detection_height[0] += 0.005
+            detection_rows[0] = DetectionRow(detection_height[0])
         if key_press & 0xFF == ord('o'):
             detection_height[1] -= 0.005
+            detection_rows[1] = DetectionRow(detection_height[1])
         if key_press & 0xFF == ord('l'):
             detection_height[1] += 0.005
+            detection_rows[1] = DetectionRow(detection_height[1])
 
         # Detection settings
         if key_press & 0xFF == ord('t'):
@@ -233,7 +238,7 @@ def run(fname):
         if key_press & 0xFF == ord('g'):
             filter_threshold -= 2
             print(filter_threshold)
-        if key_press & 0xFF == ord('c'):
+        if key_press & 0xFF == ord('z'):
             filter_grayscale = not filter_grayscale
         
         if key_press & 0xFF == ord('s') and is_video:
@@ -250,21 +255,23 @@ def run(fname):
 
     cv.destroyAllWindows()
 
-
-detection_height = [0.25, 0.5]
-
 filter_grayscale = False
 filter_type = cv.THRESH_TOZERO
-filter_threshold = 72
+filter_threshold = 60
 
 font = cv.FONT_HERSHEY_SIMPLEX
 
 # Notes are distorted vertically; as the distance from top increases, note height decreases linearly
 # Top note height has been measured to be 12% of total fret board size at the top, with a scaling factor of 1/12
 # In other words note height shrinks by 1 pixel for every 12 pixels a note travels down the screen
-# Rendered note height can thus be calculated as: renderedNoteHeigh = baseNoteHeight - (y * noteDistortion)
-baseNoteHeight = 0.12
-noteDistortion = 1 / 12
+# Rendered note height can thus be calculated as: renderedNoteHeigh = base_note_height - (y * note_distortion)
+base_note_height = 0.12
+note_distortion = 1 / 12
+
+confidence_threshold = 0.55
+
+detection_height = [0.25, 0.5]
+detection_rows = [DetectionRow(detection_height[0]), DetectionRow(detection_height[1])]
 
 
 GREEN = (50, 255, 50)
