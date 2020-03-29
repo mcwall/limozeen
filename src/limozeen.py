@@ -60,42 +60,71 @@ def get_transformed_img(frame, coords):
     return warped_img
 
 
-def output(frame, fret):
-    height, frameWidth, ch = frame.shape
-    fretHeight, fretWidth, ch = fret.shape
-    width = int((frameWidth + fretWidth) * 1.1)
+def filter_func(img):
+    # output = cv.Sobel(img,cv.CV_64F,0,1,ksize=5)
 
-    output = np.zeros((int(height), width, 3), np.uint8)
-    output[0:height, 0:frameWidth] = frame
-    output[0:fretHeight, width-fretWidth:width] = fret
+    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+    ret,thresh1 = cv.threshold(gray,127,255,cv.THRESH_BINARY)
+    output = cv.cvtColor(thresh1,cv.COLOR_GRAY2RGB)
 
     return output
 
 
-# Detection zones are represented as a percentage of overall fret height
+def detect_filter(fret, zone):
+    #kernel = np.ones((5,5),np.float32)/25
+    #output = cv.filter2D(img,-1,kernel)
+    
+    img = fret[zone.p1[1]:zone.p2[1], zone.p1[0]:zone.p2[0]]
+    fret[zone.p1[1]:zone.p2[1], zone.p1[0]:zone.p2[0]] = filter_func(img)
+    cv.rectangle(fret, zone.p1, zone.p2, (0,0,255), 3)  
+
+
+def output(frame, fret, detection_rows):
+    height, frameWidth, ch = frame.shape
+    fretHeight, fretWidth, ch = fret.shape
+    width = int((frameWidth + fretWidth) * 1.5)
+
+    for detection_row in detection_rows:
+        for zone in detection_row.zones:
+            detect_filter(fret, zone)
+
+    output = np.zeros((int(height), width, 3), np.uint8)
+    output[0:height, 0:frameWidth] = frame
+    output[0:fretHeight, width-fretWidth:width] = fret
+    output[0:fretHeight, width-2*fretWidth:width-fretWidth] = filter_func(fret)
+
+
+    return output
+
+
 class DetectionZone:
-    def __init__(self, center):
-        self.center = center
-        self.height = baseNoteHeight - (center * noteDistortion)
-        self.state = [False,False,False,False,False]
+    def __init__(self, fret, i, top, bottom):
+        fretHeight, fretWidth, ch = fret.shape
+        x1 = fretWidth * (i / 5)
+        x2 = x1 + (fretWidth / 5)
+
+        self.p1 = (int(x1), top)
+        self.p2 = (int(x2), bottom)
+        self.detected = i == 1 or i == 3
 
 
-def detect_zone(fret, zone):
-    height, width, ch = fret.shape
-    top = (zone.center - zone.height / 2) * height
-    bottom = (zone.center + zone.height / 2) * height
+# Detection zones are represented as a percentage of overall fret height
+class DetectionRow:
+    def __init__(self, fret, center_ratio):
+        fretHeight, fretWidth, ch = fret.shape
 
-    for i in range(5):
-        x1 = int(i/5 * width)
-        x2 = int(x1 + width / 5)
-        cv.rectangle(fret,(x1,int(top)), (x2,int(bottom)),(0,0,255), 3)
+        self.center = fretHeight * center_ratio
+        self.height = fretHeight * (baseNoteHeight - (center_ratio * noteDistortion))
+        self.top = int(self.center - (self.height / 2))
+        self.bottom = int(self.center + (self.height / 2))
+
+        self.zones = [DetectionZone(fret, i, self.top, self.bottom) for i in range(5)]
 
 
 def detect(fret):
-    detection_zones = [DetectionZone(experiment)]
+    detection_rows = [DetectionRow(fret, experiment)]
 
-    for zone in detection_zones:
-        detect_zone(fret, zone)
+    return detection_rows
 
 
 def process_frame(frame):
@@ -112,22 +141,25 @@ def process_frame(frame):
     fret = get_transformed_img(frame, pts)
 
     # Detection zones
-    detect(fret)
+    detection_rows = detect(fret)
 
-
-    return output(frame, fret)
+    return output(frame, fret, detection_rows)
 
 
 def transform_video_file():
     # init stream and window
-    cap = cv.VideoCapture('../content/metal1080.mp4')
+    cap = cv.VideoCapture('../content/flames720.mp4')
     cv.namedWindow('vidstream', cv.WINDOW_NORMAL)
     cv.resizeWindow('vidstream', 1920, 720)
 
     paused = False
+    frame = None
+    ret = None
     while cap.isOpened():
         global experiment
-        ret, frame = cap.read()
+
+        if not paused:
+            ret, frame = cap.read()
 
         # check for input
         key_press = cv.waitKey(1)
@@ -140,10 +172,10 @@ def transform_video_file():
             experiment -= 0.005
         if key_press & 0xFF == ord('l'):
             experiment += 0.005
+        if key_press & 0xFF == ord('f'):
+            ret, frame = cap.read()
+            paused = True
         
-        if paused:
-            continue
-
         if not ret:
             print("Can't receive frame (stream end?). Exiting ...")
             break
@@ -184,5 +216,5 @@ baseNoteHeight = 0.12
 noteDistortion = 1 / 12
 
 
-# transform_img()
+#transform_img()
 transform_video_file()
